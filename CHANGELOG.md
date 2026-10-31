@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Summary
+Shelf can compress pictures to a chosen size, reduce PDFs, and convert pictures between image formats. Optional limits keep a picture from being shrunk or compressed past a line you set.
+
+### Added
+- Shelf can compress pictures under a size chosen in KB or MB, from a picture’s menu, the shelf’s compress button, or Dynamic Island’s files page. Settings → Shelf → Compression sets the order, which resolutions and JPEG qualities are tried, and the conversion quality. Keep detail tries a milder step before a smaller picture. Shrink first walks the resolutions, then lowers JPEG quality only at the smallest size still allowed. An animation keeps its first frame, and the original file on disk stays where it was.
+- The compress window and Settings → Shelf → Compression can set a minimum width, a minimum height, a minimum quality, and a minimum file size. Each applies only when its checkbox is on. The picture is not enlarged to meet a size, it is not scaled below a checked width or height, JPEG quality does not go below a checked minimum, and the file is not made smaller than a checked minimum size.
+- Shelf can reduce a PDF from the item menu, or from the shelf’s compress button when the selection has PDFs and no pictures. The list shows Original, Lossless, Maximum, High, Medium, and Low, and calculates the size before replacing the shelf copy. Quality choices flatten each page into an image, so text is no longer selectable. Lossless keeps text and vectors. Settings → Shelf → PDF size sets grayscale and each choice’s detail and JPEG quality. A checked minimum quality and minimum file size apply here too.
+- A picture’s menu can convert it to JPEG, PNG, TIFF, HEIC, GIF, or BMP, and to JPEG 2000 when this Mac can write it. JPEG, HEIC, and JPEG 2000 use the conversion quality, and a checked minimum quality is honored.
+
 ## [3.4.3] - 2026-10-29
 
 ### Summary

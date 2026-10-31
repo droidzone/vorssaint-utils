@@ -449,6 +449,11 @@ if (( TEST )); then
         Sources/Vorssaint/Services/AutoQuit/AutoQuitSupport.swift
         Sources/Vorssaint/Core/AutoQuitDockAppsStrings.swift
         Sources/Vorssaint/Services/Shelf/ShelfSupport.swift
+        Sources/Vorssaint/Services/Shelf/ShelfImageFit.swift
+        Sources/Vorssaint/Services/Shelf/ShelfImageFitPolicy.swift
+        Sources/Vorssaint/Services/Shelf/ShelfPDFFit.swift
+        Sources/Vorssaint/Core/ShelfImageFitStrings.swift
+        Sources/Vorssaint/Core/ShelfCompressStrings.swift
         Sources/Vorssaint/Services/Shelf/ShelfFilePromiseTransfer.swift
         Sources/Vorssaint/Core/ShelfPromiseDeliveryStrings.swift
         Sources/Vorssaint/Services/Finder/FinderRenameSupport.swift

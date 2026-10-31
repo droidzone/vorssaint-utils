@@ -1311,6 +1311,50 @@ final class ShelfService: ObservableObject {
         fileURLs(in: selection.contains(item.id) ? selectedItems() : [item])
     }
 
+    /// Pictures the tile menu can compress. A selected tile takes the whole
+    /// selection; notes, links and other files in that selection are skipped.
+    func imageFitTargets(startingAt item: Item) -> [ShelfImageFitTarget] {
+        let scope = selection.contains(item.id) ? selectedItems() : [item]
+        return Self.imageFitTargets(in: dragItems(for: scope))
+    }
+
+    /// Pictures the shelf's own compress button acts on: the selection, or
+    /// every picture when nothing is selected.
+    func imageFitTargetsForActions() -> [ShelfImageFitTarget] {
+        let scope = selection.isEmpty ? items : selectedItems()
+        return Self.imageFitTargets(in: dragItems(for: scope))
+    }
+
+    var hasImagesForFit: Bool { !imageFitTargetsForActions().isEmpty }
+
+    func pdfFitTargets(startingAt item: Item) -> [ShelfImageFitTarget] {
+        let scope = selection.contains(item.id) ? selectedItems() : [item]
+        return Self.pdfFitTargets(in: dragItems(for: scope))
+    }
+
+    func pdfFitTargetsForActions() -> [ShelfImageFitTarget] {
+        let scope = selection.isEmpty ? items : selectedItems()
+        return Self.pdfFitTargets(in: dragItems(for: scope))
+    }
+
+    var hasPDFsForFit: Bool { !pdfFitTargetsForActions().isEmpty }
+
+    private static func imageFitTargets(in items: [Item]) -> [ShelfImageFitTarget] {
+        ShelfImageFit.targets(from: items.map { item in
+            let url: URL?
+            if case let .file(file) = item.payload { url = file } else { url = nil }
+            return ShelfImageFitLeaf(id: item.id, isImage: item.isImage, url: url)
+        })
+    }
+
+    private static func pdfFitTargets(in items: [Item]) -> [ShelfImageFitTarget] {
+        ShelfImageFit.pdfTargets(from: items.map { item in
+            let url: URL?
+            if case let .file(file) = item.payload { url = file } else { url = nil }
+            return ShelfImageFitLeaf(id: item.id, isImage: false, url: url)
+        })
+    }
+
     /// What the panel's own buttons act on: the selection when there is one,
     /// everything otherwise, the way its trash button already reads. A grab
     /// whose files have all died says so and retires them, exactly as a dead
@@ -1669,6 +1713,30 @@ final class ShelfService: ObservableObject {
             return nil
         }
         return item.id
+    }
+
+    /// Swaps one shelf tile for a picture this app just wrote, keeping its pin
+    /// and place. The original file on disk is left where it was. A picture
+    /// the shelf itself stored is dropped once nothing on the shelf points at it.
+    @discardableResult
+    func replaceItemWithGeneratedFile(_ id: UUID, data: Data, named name: String) -> Bool {
+        guard item(withID: id) != nil else { return false }
+        let store = Self.storeDirectory ?? tempDir
+        guard let url = ShelfPersistenceSupport.writeGeneratedFile(data, named: name, in: store) else {
+            return false
+        }
+        let replacement = fileItem(for: url, id: id, deferImageThumbnail: true)
+        let previous = item(withID: id)
+        replaceItem(replacement)
+        guard case let .file(current)? = item(withID: id)?.payload,
+              current.standardizedFileURL.path == url.standardizedFileURL.path else {
+            ShelfFilePromiseTransfer.discard([url], in: store)
+            return false
+        }
+        if let previous { discardOwnedPayloads(in: [previous]) }
+        startContentThumbnails(for: [replacement])
+        noteInteraction()
+        return true
     }
 
     /// The pasteboard representation used when dragging an item out of the shelf.

@@ -205,6 +205,17 @@ struct NotchFilesView: View {
                 .disabled(!shelf.hasFilesForActions || !archives.canAcceptMediaDrop)
                 .popover(isPresented: $showingActions) { fileActions.padding(14).frame(width: 270) }
             }
+            NotchIconButton(symbol: "rectangle.compress.vertical",
+                            title: shelf.hasImagesForFit
+                            ? ShelfImageFitStrings.localized(l10n.language).help
+                            : ShelfCompressStrings.localized(l10n.language).pdfMenu) {
+                if shelf.hasImagesForFit {
+                    ShelfImageFitPresenter.shared.present(shelf.imageFitTargetsForActions())
+                } else {
+                    ShelfPDFFitPresenter.shared.present(shelf.pdfFitTargetsForActions())
+                }
+            }
+            .disabled(!shelf.hasImagesForFit && !shelf.hasPDFsForFit)
             NotchIconButton(symbol: "square.and.arrow.up", title: l10n.s.shelfActionShare) {
                 shareAnchor.present(shelf.fileURLsForActions())
             }

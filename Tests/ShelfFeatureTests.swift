@@ -9,6 +9,8 @@ import CoreGraphics
 import Darwin
 import Foundation
 import ImageIO
+import PDFKit
+import UniformTypeIdentifiers
 import VMStatisticsCompat
 
 enum ShelfFeatureTests {
@@ -981,9 +983,275 @@ enum ShelfFeatureTests {
                "a floating overlay stays an accessible window for assistive technology")
         let tooltipSource = (try? String(
             contentsOfFile: "Sources/Vorssaint/UI/Shelf/ShelfTooltipPopover.swift", encoding: .utf8)) ?? ""
+        // MARK: Compress images to a size
+
+        suite.expect(ShelfImageFit.sanitizedKilobytes(0) == ShelfImageFit.minimumKilobytes
+                && ShelfImageFit.sanitizedKilobytes(500) == 500
+                && ShelfImageFit.sanitizedKilobytes(99_999) == ShelfImageFit.maximumKilobytes,
+               "a chosen image size stays inside the shelf's limits")
+        suite.expect(ShelfImageFit.storedKilobytes(0) == ShelfImageFit.defaultKilobytes
+                && ShelfImageFit.targetBytes(kilobytes: 250) == 250_000,
+               "an unset size preference uses the default, and kilobytes are 1000-based")
+        suite.expect(ShelfImageFit.presetLabel(kilobytes: 500) == "500 KB"
+                && ShelfImageFit.presetLabel(kilobytes: 2_000) == "2 MB",
+               "size presets read as kilobytes until they land on a whole megabyte")
+        suite.expect(ShelfImageFit.outputFileName(for: URL(fileURLWithPath: "/tmp/Photo Shot.png"),
+                                                  format: .jpeg) == "Photo Shot.jpg"
+                && ShelfImageFit.outputFileName(for: URL(fileURLWithPath: "/tmp/.."),
+                                                format: .heic) == "Image.heic",
+               "a compressed picture keeps its name and takes the format that made it fit")
+
+        let imageID = UUID()
+        let photoID = UUID()
+        let targets = ShelfImageFit.targets(from: [
+            ShelfImageFitLeaf(id: imageID, isImage: true, url: URL(fileURLWithPath: "/tmp/a.png")),
+            ShelfImageFitLeaf(id: UUID(), isImage: false, url: nil),
+            ShelfImageFitLeaf(id: UUID(), isImage: false, url: URL(fileURLWithPath: "/tmp/clip.mov")),
+            ShelfImageFitLeaf(id: photoID, isImage: false, url: URL(fileURLWithPath: "/tmp/scan.JPG")),
+        ])
+        suite.expect(targets.map(\.id) == [imageID, photoID],
+               "compressing offers pictures, including by extension, and skips notes and video")
+
+        suite.expect(ShelfFitByteUnit.kilobyte.bytes(from: 250) == 250_000
+                && ShelfFitByteUnit.megabyte.bytes(from: 2) == 2_000_000,
+               "kilobytes and megabytes in a size limit are 1000-based")
+
+        let gentle = ShelfImageFitPolicy.standard.steps(for: CGSize(width: 4000, height: 3000))
+        suite.expect(gentle.first == .jpeg(longSide: 4000, qualityPercent: 90),
+               "keeping detail tries the current size at the highest quality before shrinking, got \(String(describing: gentle.first))")
+        var shrinkPolicy = ShelfImageFitPolicy.standard
+        shrinkPolicy.order = .shrinkFirst
+        let shrunkFirst = shrinkPolicy.steps(for: CGSize(width: 4000, height: 3000))
+        suite.expect(shrunkFirst.first == .resize(longSide: 3840),
+               "shrinking first walks the resolution steps before changing format")
+        let jpegSides = shrunkFirst.compactMap { step -> Int? in
+            if case let .jpeg(side, _) = step { return side }
+            return nil
+        }
+        suite.expect(Set(jpegSides) == [640],
+               "after the resolution steps, JPEG quality is tried only at the smallest allowed size, got \(jpegSides)")
+
+        var wideFloor = ShelfImageFitPolicy.standard
+        wideFloor.minimumWidthEnabled = true
+        wideFloor.minimumWidth = 3000
+        let wideSteps = wideFloor.steps(for: CGSize(width: 4000, height: 2000))
+        let wideSides = Set(wideSteps.map { step -> Int in
+            switch step {
+            case let .jpeg(side, _): return side
+            case let .resize(side): return side
+            }
+        })
+        suite.expect(wideSides.contains(4000) && wideSides.contains(3840) && !wideSides.contains(1920),
+               "a checked minimum width skips a shrink that would go below it and does not enlarge, got \(wideSides)")
+        wideFloor.minimumWidthEnabled = false
+        let uncheckedWidth = wideFloor.steps(for: CGSize(width: 4000, height: 2000))
+        suite.expect(uncheckedWidth.contains(.jpeg(longSide: 640, qualityPercent: 70)),
+               "an unchecked minimum width is ignored even when a number is stored")
+
+        var qualityFloor = ShelfImageFitPolicy.standard
+        qualityFloor.minimumQualityEnabled = true
+        qualityFloor.minimumQualityPercent = 80
+        let floored = qualityFloor.steps(for: CGSize(width: 800, height: 600))
+        suite.expect(!floored.isEmpty && floored.allSatisfy { step in
+            if case let .jpeg(_, quality) = step { return quality >= 80 }
+            return true
+        }, "a checked minimum quality drops JPEG steps below it")
+        qualityFloor.minimumQualityEnabled = false
+        suite.expect(qualityFloor.steps(for: CGSize(width: 800, height: 600))
+            .contains(.jpeg(longSide: 640, qualityPercent: 70)),
+               "an unchecked minimum quality leaves the lower JPEG steps available")
+
+        let steps = [
+            ShelfImageFitStep.jpeg(longSide: 1000, qualityPercent: 90),
+            ShelfImageFitStep.jpeg(longSide: 800, qualityPercent: 80),
+        ]
+        suite.expect(ShelfImageFit.choose(sourceBytes: 4_000, targetBytes: 8_000, steps: steps,
+                                          minimumFileBytes: 2_000, measure: { _ in
+            suite.expect(false, "a picture already under the size is not rewritten")
+            return nil
+        }) == .alreadyWithinBudget,
+               "a picture already under the chosen size stays as it is")
+        let keptAboveFloor = ShelfImageFit.choose(sourceBytes: 10_000, targetBytes: 5_000, steps: steps,
+                                                  minimumFileBytes: 2_000) { step in
+            if case let .jpeg(side, _) = step, side == 1000 { return 1_000 }
+            return 3_000
+        }
+        suite.expect(keptAboveFloor == .step(.jpeg(longSide: 800, qualityPercent: 80)),
+               "a result under the target is skipped when it is also under the minimum file size, got \(keptAboveFloor)")
+        suite.expect(ShelfImageFit.choose(sourceBytes: 10_000, targetBytes: 5_000, steps: steps,
+                                          minimumFileBytes: 2_000, measure: { _ in 500 }) == .heldForMinimum,
+               "when every fit would pass the minimum file size, the original stays")
+        suite.expect(ShelfImageFit.choose(sourceBytes: 10_000, targetBytes: 5_000, steps: steps,
+                                          minimumFileBytes: nil, measure: { _ in 1_000 })
+                == .step(.jpeg(longSide: 1000, qualityPercent: 90)),
+               "an unchecked minimum file size does not reject a small enough file")
+        suite.expect(ShelfImageFit.choose(sourceBytes: 9_000_000, targetBytes: 100, steps: steps,
+                                          minimumFileBytes: nil, measure: { _ in 10_000 }) == .impossible,
+               "a budget no step can reach is reported instead of writing an oversized file")
+
+        let summary = ShelfImageFit.summary(ShelfImageFitCounts(fitted: 2, already: 1, failed: 0),
+                                            strings: .enUS)
+        suite.expect(summary == "2 compressed\nAlready under this size",
+               "the result names what was compressed and what was already small enough, got \(summary)")
+
+        let noiseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shelf-fit-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: noiseURL) }
+        var permissive = ShelfImageFitPolicy.standard
+        permissive.order = .protectDetail
+        permissive.resolutions = [320, 160]
+        permissive.qualities = [80, 40]
+        permissive.minimumWidthEnabled = false
+        permissive.minimumHeightEnabled = false
+        permissive.minimumQualityEnabled = false
+        permissive.minimumFileSizeEnabled = false
+        if writeNoisePNG(width: 640, height: 160, to: noiseURL) {
+            let original = (try? noiseURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            let budget = 12_000
+            suite.expect(original > budget, "the sample picture starts over the budget, got \(original)")
+            switch ShelfImageFit.encode(url: noiseURL, targetBytes: Int64(budget), policy: permissive) {
+            case let .file(data, format):
+                suite.expect(data.count <= budget, "the compressed picture is under \(budget) bytes, got \(data.count)")
+                suite.expect(format == .jpeg, "the size ladder saves a JPEG")
+                if let size = decodedSize(data) {
+                    let ratio = size.width / size.height
+                    suite.expect(abs(ratio - 4) / 4 < 0.08,
+                           "scaling keeps the aspect ratio, got \(size.width) by \(size.height)")
+                    suite.expect(size.width <= 640 && size.height <= 160 && size.width > size.height,
+                           "the picture is never enlarged, got \(size.width) by \(size.height)")
+                } else {
+                    suite.expect(false, "the compressed picture can be read back")
+                }
+            case .alreadyWithinBudget:
+                suite.expect(false, "the sample picture was already under the budget")
+            case .heldForMinimum:
+                suite.expect(false, "the sample picture was held by a minimum that is off")
+            case .impossible, .unreadable:
+                suite.expect(false, "the sample picture could not be compressed under the budget")
+            }
+            if case let .file(converted, format) = ShelfImageFit.convert(url: noiseURL, to: .png, qualityPercent: 90) {
+                suite.expect(format == .png && !converted.isEmpty, "a picture can be rewritten as PNG")
+            } else {
+                suite.expect(false, "a picture can be rewritten as PNG")
+            }
+        } else {
+            suite.expect(false, "the sample picture could not be written")
+        }
+
+        let pdfURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shelf-pdf-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: pdfURL) }
+        if writeNoisePDF(to: pdfURL),
+           let sourceDocument = PDFDocument(url: pdfURL),
+           let sourcePage = sourceDocument.page(at: 0) {
+            let sourceBox = sourcePage.bounds(for: .mediaBox)
+            let sourceBytes = (try? pdfURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            var pdfPolicy = ShelfPDFFitPolicy.standard
+            pdfPolicy.low = ShelfPDFFitLevel(dpi: 72, qualityPercent: 40)
+            let reduced = ShelfPDFFit.encode(url: pdfURL, preset: .low,
+                                             pdfPolicy: pdfPolicy, imagePolicy: permissive)
+            if case let .file(data) = reduced {
+                suite.expect(data.count < sourceBytes,
+                       "a low quality PDF is smaller than the noisy original, got \(data.count) from \(sourceBytes)")
+                if let document = PDFDocument(data: data), let page = document.page(at: 0) {
+                    let box = page.bounds(for: .mediaBox)
+                    suite.expect(document.pageCount == 1
+                            && abs(box.width - sourceBox.width) < 1
+                            && abs(box.height - sourceBox.height) < 1,
+                           "the reduced PDF keeps one page at the original page size, got \(box)")
+                } else {
+                    suite.expect(false, "the reduced PDF can be opened")
+                }
+            } else {
+                suite.expect(false, "the noisy PDF can be reduced, got \(reduced)")
+            }
+            let lossless = ShelfPDFFit.encode(url: pdfURL, preset: .lossless,
+                                              pdfPolicy: pdfPolicy, imagePolicy: permissive)
+            switch lossless {
+            case .unchanged:
+                break
+            case let .file(data):
+                suite.expect(PDFDocument(data: data)?.pageCount == 1, "a lossless rewrite stays a readable PDF")
+            case .belowMinimum, .unreadable:
+                suite.expect(false, "a lossless rewrite stays readable, got \(lossless)")
+            }
+        } else {
+            suite.expect(false, "the sample PDF could not be written")
+        }
+
+        let tilesSource = (try? String(
+            contentsOfFile: "Sources/Vorssaint/UI/Shelf/ShelfTilesView.swift", encoding: .utf8)) ?? ""
+        suite.expect(tilesSource.contains("imageFitTargets(startingAt:")
+                && tilesSource.contains("ShelfImageFitPresenter.shared.present")
+                && tilesSource.contains("convertImage")
+                && tilesSource.contains("ShelfPDFFitPresenter.shared.present"),
+               "a picture on the shelf offers compressing, converting, and reducing a PDF")
+
         suite.expect(shelfServiceSource.contains("class KeyableShelfPanel: OverlayPanel")
                 && !shelfServiceSource.contains("NSPanel(contentRect")
                 && tooltipSource.contains("OverlayPanel(contentRect") && !tooltipSource.contains("NSPanel(contentRect"),
                "every Shelf window, the pill, card, edge peek and item tooltip, is a floating overlay")
+    }
+
+    private static func writeNoisePNG(width: Int, height: Int, to url: URL) -> Bool {
+        var pixels = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let index = (y * width + x) * 4
+                pixels[index] = UInt8((x * 17 + y * 13) & 255)
+                pixels[index + 1] = UInt8((x * 29 + y * 7) & 255)
+                pixels[index + 2] = UInt8((x * 3 + y * 19) & 255)
+            }
+        }
+        let space = CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let image = CGImage(width: width, height: height,
+                                  bitsPerComponent: 8, bitsPerPixel: 32,
+                                  bytesPerRow: width * 4, space: space,
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false,
+                                  intent: .defaultIntent),
+              let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            return false
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        return CGImageDestinationFinalize(destination)
+    }
+
+    private static func writeNoisePDF(to url: URL) -> Bool {
+        let width = 900
+        let height = 900
+        var pixels = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let index = (y * width + x) * 4
+                pixels[index] = UInt8((x * 13 + y * 29) & 255)
+                pixels[index + 1] = UInt8((x * 7 + y * 17) & 255)
+                pixels[index + 2] = UInt8((x * 23 + y * 3) & 255)
+            }
+        }
+        let space = CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let image = CGImage(width: width, height: height,
+                                  bitsPerComponent: 8, bitsPerPixel: 32,
+                                  bytesPerRow: width * 4, space: space,
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false,
+                                  intent: .defaultIntent),
+              let consumer = CGDataConsumer(url: url as CFURL) else { return false }
+        var box = CGRect(x: 0, y: 0, width: 400, height: 400)
+        guard let context = CGContext(consumer: consumer, mediaBox: &box, nil) else { return false }
+        context.beginPDFPage(nil)
+        context.draw(image, in: box)
+        context.endPDFPage()
+        context.closePDF()
+        return true
+    }
+
+    private static func decodedSize(_ data: Data) -> (width: Double, height: Double)? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let size = MediaSupport.imageDisplaySize(properties: properties) else { return nil }
+        return (Double(size.width), Double(size.height))
     }
 }

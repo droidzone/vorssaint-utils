@@ -591,6 +591,51 @@ final class ShelfTileView: NSView, NSDraggingSource {
             menu.addItem(edit)
         }
 
+        let fitTargets = ShelfService.shared.imageFitTargets(startingAt: item)
+        if !fitTargets.isEmpty {
+            let fitStrings = ShelfImageFitStrings.localized(L10n.shared.language)
+            let title = fitTargets.count == 1
+                ? fitStrings.menu
+                : String(format: fitStrings.menuCount, fitTargets.count)
+            let compress = NSMenuItem(title: title,
+                                      action: #selector(compressToSize),
+                                      keyEquivalent: "")
+            compress.target = self
+            compress.image = NSImage(systemSymbolName: "rectangle.compress.vertical",
+                                     accessibilityDescription: nil)
+            menu.addItem(compress)
+            let convert = NSMenuItem(title: ShelfCompressStrings.localized(L10n.shared.language).convertMenu,
+                                     action: nil,
+                                     keyEquivalent: "")
+            let formats = NSMenu(title: convert.title)
+            for format in ShelfImageConvertFormat.writable {
+                let entry = NSMenuItem(title: format.title(ShelfCompressStrings.localized(L10n.shared.language)),
+                                       action: #selector(convertImage(_:)),
+                                       keyEquivalent: "")
+                entry.target = self
+                entry.representedObject = format.rawValue
+                formats.addItem(entry)
+            }
+            convert.submenu = formats
+            convert.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath",
+                                    accessibilityDescription: nil)
+            menu.addItem(convert)
+        }
+
+        let pdfTargets = ShelfService.shared.pdfFitTargets(startingAt: item)
+        if !pdfTargets.isEmpty {
+            let pdfStrings = ShelfCompressStrings.localized(L10n.shared.language)
+            let title = pdfTargets.count == 1
+                ? pdfStrings.pdfMenu
+                : String(format: pdfStrings.pdfMenuCount, pdfTargets.count)
+            let reduce = NSMenuItem(title: title,
+                                    action: #selector(reducePDF),
+                                    keyEquivalent: "")
+            reduce.target = self
+            reduce.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
+            menu.addItem(reduce)
+        }
+
         menu.addItem(sharePresenter.shareMenuItem(for: urls, title: strings.shelfActionShare))
         menu.addItem(.separator())
 
@@ -662,6 +707,20 @@ final class ShelfTileView: NSView, NSDraggingSource {
         guard let url = ShelfInteractionSupport.editableImage(
             in: ShelfService.shared.fileURLsForActions(startingAt: item)) else { return }
         ScreenshotService.shared.editImage(at: url)
+    }
+
+    @objc private func compressToSize() {
+        ShelfImageFitPresenter.shared.present(ShelfService.shared.imageFitTargets(startingAt: item))
+    }
+
+    @objc private func convertImage(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let format = ShelfImageConvertFormat(rawValue: raw) else { return }
+        ShelfImageConvert.start(ShelfService.shared.imageFitTargets(startingAt: item), format: format)
+    }
+
+    @objc private func reducePDF() {
+        ShelfPDFFitPresenter.shared.present(ShelfService.shared.pdfFitTargets(startingAt: item))
     }
 
     @objc private func revealFiles() {

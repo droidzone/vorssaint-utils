@@ -157,6 +157,8 @@ struct ShelfSettings: View {
                     }
                 }
 
+                ShelfCompressionSettings()
+
                 Section(l10n.s.shelfExclusionsTitle) {
                     if sortedExclusions.isEmpty {
                         Text(l10n.s.shelfExclusionsEmpty)

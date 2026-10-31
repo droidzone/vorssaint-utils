@@ -24,3 +24,7 @@ CLAUDE.md
 *.xcodeproj
 xcuserdata/
 .swiftpm/
+.cursor/
+.vscode/
+compile.sh
+build.sh

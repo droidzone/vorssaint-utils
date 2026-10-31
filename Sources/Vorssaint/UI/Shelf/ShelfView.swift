@@ -22,6 +22,7 @@ struct ShelfView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var clearButtonHovered = false
     @State private var shareButtonHovered = false
+    @State private var fitButtonHovered = false
     /// The system share sheet points at a real view, which SwiftUI does not
     /// hand out; this invisible one sits behind the share button.
     @State private var shareAnchor = ShelfSharePickerAnchor.Anchor()
@@ -165,10 +166,35 @@ struct ShelfView: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
             Spacer(minLength: 8)
+            fitButton
             shareButton
             clearButton
         }
         .frame(minHeight: 30)
+    }
+
+    private var fitButton: some View {
+        let images = shelf.hasImagesForFit
+        let enabled = images || shelf.hasPDFsForFit
+        let hovered = fitButtonHovered && enabled
+        let strings = ShelfImageFitStrings.localized(l10n.language)
+        let help = images ? strings.help : ShelfCompressStrings.localized(l10n.language).pdfMenu
+        return Button {
+            if images {
+                ShelfImageFitPresenter.shared.present(shelf.imageFitTargetsForActions())
+            } else {
+                ShelfPDFFitPresenter.shared.present(shelf.pdfFitTargetsForActions())
+            }
+        } label: {
+            footerButtonFace(systemImage: "rectangle.compress.vertical", tint: .accentColor, hovered: hovered)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(hovered ? Color.accentColor : Color.secondary)
+        .opacity(enabled ? 1 : 0.4)
+        .onHover { fitButtonHovered = $0 }
+        .disabled(!enabled)
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     private var shareButton: some View {
