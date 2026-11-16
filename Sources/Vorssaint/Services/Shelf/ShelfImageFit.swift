@@ -116,6 +116,131 @@ enum ShelfImageFit {
         if base.count > 180 { base = String(base.prefix(180)) }
         return base + "." + format.fileExtension
     }
+}
+
+/// What to do when a rewritten file would keep the source file's name.
+/// The default adds `_vor` before the extension. Overwrite reuses the name
+/// and keeps the original bytes beside it as `_bak`.
+enum ShelfSavedNameStyle: String {
+    case addVor = "vor"
+    case overwriteOriginal = "overwrite"
+
+    static func current(in defaults: UserDefaults = .standard) -> Self {
+        guard let raw = defaults.string(forKey: DefaultsKey.shelfOutputNaming),
+              let style = ShelfSavedNameStyle(rawValue: raw) else { return .addVor }
+        return style
+    }
+}
+
+struct ShelfSavedNamePlan: Equatable {
+    var fileName: String
+    /// Set only when the new bytes should take the original file's place.
+    var backupFileName: String?
+
+    var replacesOriginal: Bool { backupFileName != nil }
+}
+
+enum ShelfSavedName {
+    static func sameFileName(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.compare(rhs, options: [.caseInsensitive]) == .orderedSame
+    }
+
+    /// `photo.jpg` with `_vor` becomes `photo_vor.jpg`.
+    static func inserting(_ suffix: String, into fileName: String) -> String {
+        let name = fileName as NSString
+        let ext = name.pathExtension
+        let base = name.deletingPathExtension
+        guard !ext.isEmpty else { return base + suffix }
+        return base + suffix + "." + ext
+    }
+
+    /// Leaves a proposed name alone when it already differs from the source.
+    /// A matching name either gains `_vor` or stays, with a `_bak` name for the original.
+    static func plan(sourceFileName: String,
+                     proposed: String,
+                     style: ShelfSavedNameStyle = .current()) -> ShelfSavedNamePlan {
+        guard sameFileName(sourceFileName, proposed) else {
+            return ShelfSavedNamePlan(fileName: proposed, backupFileName: nil)
+        }
+        switch style {
+        case .addVor:
+            return ShelfSavedNamePlan(fileName: inserting("_vor", into: proposed), backupFileName: nil)
+        case .overwriteOriginal:
+            return ShelfSavedNamePlan(fileName: sourceFileName,
+                                      backupFileName: inserting("_bak", into: sourceFileName))
+        }
+    }
+
+    /// `photo_bak.jpg`, or `photo_bak 2.jpg` when that name is already taken.
+    static func availableBackupName(_ backupName: String, exists: (String) -> Bool) -> String {
+        if !exists(backupName) { return backupName }
+        let name = backupName as NSString
+        let base = name.deletingPathExtension
+        let ext = name.pathExtension
+        var index = 2
+        while index < 1_000 {
+            let candidate = ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)"
+            if !exists(candidate) { return candidate }
+            index += 1
+        }
+        return backupName
+    }
+
+    /// Moves the original aside as the backup name, then writes the new bytes
+    /// at the original path. A failed write puts the original back.
+    static func replaceOriginal(at source: URL, with data: Data, backupName: String,
+                                fileManager: FileManager = .default) -> Bool {
+        let directory = source.deletingLastPathComponent()
+        let resolved = availableBackupName(backupName) { name in
+            fileManager.fileExists(atPath: directory.appendingPathComponent(name).path)
+        }
+        let backup = directory.appendingPathComponent(resolved)
+        guard backup.standardizedFileURL.path != source.standardizedFileURL.path,
+              fileManager.fileExists(atPath: source.path) else { return false }
+        do {
+            try fileManager.moveItem(at: source, to: backup)
+        } catch {
+            return false
+        }
+        do {
+            try data.write(to: source, options: .atomic)
+        } catch {
+            try? fileManager.moveItem(at: backup, to: source)
+            return false
+        }
+        return true
+    }
+}
+
+extension ShelfImageFit {
+    /// One finished file, written the way the result dialog reads it:
+    /// `"photo.png" (100 MB) -> photo (75 KB)`. The new name drops its extension.
+    /// A file that was not rewritten keeps the quoted original and a short note.
+    static func resultLine(sourceName: String,
+                           sourceBytes: Int64,
+                           outputName: String? = nil,
+                           outputBytes: Int64? = nil,
+                           note: String? = nil) -> String {
+        let original = "\"\(sourceName)\" (\(byteLabel(sourceBytes)))"
+        if let outputName, let outputBytes {
+            return "\(original) -> \(resultName(outputName)) (\(byteLabel(outputBytes)))"
+        }
+        if let note, !note.isEmpty {
+            return "\(original) -> \(note)"
+        }
+        return original
+    }
+
+    static func byteLabel(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: max(0, bytes))
+    }
+
+    private static func resultName(_ fileName: String) -> String {
+        let base = (fileName as NSString).deletingPathExtension
+        return base.isEmpty ? fileName : base
+    }
 
     static func summary(_ counts: ShelfImageFitCounts, strings: ShelfImageFitStrings) -> String {
         var parts: [String] = []

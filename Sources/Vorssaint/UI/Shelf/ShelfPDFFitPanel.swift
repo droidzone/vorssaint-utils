@@ -13,7 +13,7 @@ final class ShelfPDFFitPresenter: ObservableObject {
     @Published var phase: Phase = .editing
     @Published private(set) var fileCount = 0
     @Published private(set) var currentBytes: Int64 = 0
-    @Published private(set) var calculating: ShelfPDFFitPreset?
+    @Published private(set) var isCalculating = false
     @Published private(set) var sizes: [ShelfPDFFitPreset: Int64] = [:]
     @Published private(set) var belowMinimum: Set<ShelfPDFFitPreset> = []
 
@@ -47,7 +47,7 @@ final class ShelfPDFFitPresenter: ObservableObject {
         sizes = [.original: currentBytes]
         belowMinimum = []
         cache = [:]
-        calculating = nil
+        isCalculating = false
         phase = .editing
         if !holdingShelf {
             ShelfService.shared.beginInteraction()
@@ -57,12 +57,17 @@ final class ShelfPDFFitPresenter: ObservableObject {
         position(panel)
         panel.orderFrontRegardless()
         panel.makeKey()
+        calculateAll()
     }
 
     func select(_ preset: ShelfPDFFitPreset) {
         self.preset = preset
-        guard preset.reduces, sizes[preset] == nil, !belowMinimum.contains(preset) else { return }
-        calculate(preset)
+    }
+
+    var canReduce: Bool {
+        guard preset.reduces, !isCalculating, !isWorking else { return false }
+        guard let size = sizes[preset], !belowMinimum.contains(preset) else { return false }
+        return size < currentBytes
     }
 
     func setGrayscale(_ on: Bool) {
@@ -72,9 +77,7 @@ final class ShelfPDFFitPresenter: ObservableObject {
         sizes = [.original: currentBytes]
         belowMinimum = []
         cache = [:]
-        calculating = nil
-        generation += 1
-        if preset.reduces { calculate(preset) }
+        calculateAll()
     }
 
     func reduce() {
@@ -87,7 +90,7 @@ final class ShelfPDFFitPresenter: ObservableObject {
         let generation = self.generation
         phase = .working(done: 0, total: targets.count)
         apply(targets, index: 0, preset: preset, policy: policy, imagePolicy: imagePolicy,
-              generation: generation, counts: ShelfImageFitCounts())
+              generation: generation, counts: ShelfImageFitCounts(), lines: [])
     }
 
     func close() {
@@ -114,7 +117,7 @@ final class ShelfPDFFitPresenter: ObservableObject {
     }
 
     func label(for preset: ShelfPDFFitPreset, strings: ShelfCompressStrings) -> String {
-        if calculating == preset { return strings.calculating }
+        if isCalculating, preset != .original { return strings.calculating }
         if belowMinimum.contains(preset) { return strings.belowMinimum }
         if let bytes = sizes[preset] {
             return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
@@ -122,33 +125,44 @@ final class ShelfPDFFitPresenter: ObservableObject {
         if preset == .original {
             return ByteCountFormatter.string(fromByteCount: currentBytes, countStyle: .file)
         }
-        return strings.calculate
+        return strings.calculating
     }
 
-    private func calculate(_ preset: ShelfPDFFitPreset) {
-        guard let sample = targets.first else { return }
+    private func calculateAll() {
         generation += 1
         let generation = self.generation
+        let targets = self.targets
         let policy = self.policy
         let imagePolicy = ShelfImageFitPolicy.load()
-        calculating = preset
+        isCalculating = true
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = ShelfPDFFit.encode(url: sample.url, preset: preset,
-                                            pdfPolicy: policy, imagePolicy: imagePolicy)
+            var totals: [ShelfPDFFitPreset: Int64] = [:]
+            var stored: [String: ShelfPDFFitResult] = [:]
+            var below = Set<ShelfPDFFitPreset>()
+            for target in targets {
+                let measured = ShelfPDFFit.measure(url: target.url, pdfPolicy: policy, imagePolicy: imagePolicy)
+                let source = Int64((try? target.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                for (preset, result) in measured where preset != .original {
+                    stored["\(preset.rawValue)-\(policy.grayscale)-\(target.url.path)"] = result
+                    switch result {
+                    case .unchanged:
+                        totals[preset, default: 0] += source
+                    case let .file(data):
+                        totals[preset, default: 0] += Int64(data.count)
+                    case .belowMinimum:
+                        below.insert(preset)
+                    case .unreadable:
+                        break
+                    }
+                }
+            }
             DispatchQueue.main.async {
                 guard generation == self.generation else { return }
-                self.cache[self.cacheKey(preset, url: sample.url)] = result
-                switch result {
-                case .unchanged:
-                    self.sizes[preset] = self.fileBytes(sample.url)
-                case let .file(data):
-                    self.sizes[preset] = Int64(data.count)
-                case .belowMinimum:
-                    self.belowMinimum.insert(preset)
-                case .unreadable:
-                    break
-                }
-                if self.calculating == preset { self.calculating = nil }
+                self.cache = stored
+                self.sizes = totals
+                self.sizes[.original] = self.currentBytes
+                self.belowMinimum = below
+                self.isCalculating = false
                 self.relayout()
             }
         }
@@ -160,16 +174,17 @@ final class ShelfPDFFitPresenter: ObservableObject {
                        policy: ShelfPDFFitPolicy,
                        imagePolicy: ShelfImageFitPolicy,
                        generation: Int,
-                       counts: ShelfImageFitCounts) {
+                       counts: ShelfImageFitCounts,
+                       lines: [String]) {
         guard generation == self.generation else { return }
         guard index < targets.count else {
-            let strings = ShelfImageFitStrings.localized(L10n.shared.language)
-            let limits = ShelfCompressStrings.localized(L10n.shared.language)
-            phase = .finished(ShelfImageFit.summary(counts, strings: strings, limits: limits))
-            relayout()
+            ShelfFitResultDialog.show(lines)
+            close()
             return
         }
         let target = targets[index]
+        let sourceName = target.url.lastPathComponent
+        let sourceBytes = fileBytes(target.url)
         let key = cacheKey(preset, url: target.url)
         let cached = cache[key]
         DispatchQueue.global(qos: .userInitiated).async {
@@ -177,25 +192,49 @@ final class ShelfPDFFitPresenter: ObservableObject {
                                                       pdfPolicy: policy, imagePolicy: imagePolicy)
             DispatchQueue.main.async {
                 guard generation == self.generation else { return }
+                let strings = ShelfImageFitStrings.localized(L10n.shared.language)
+                let limits = ShelfCompressStrings.localized(L10n.shared.language)
                 var counts = counts
+                var lines = lines
                 switch result {
                 case .unchanged:
                     counts.already += 1
+                    lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                          sourceBytes: sourceBytes,
+                                                          note: strings.alreadyOne))
                 case .belowMinimum:
                     counts.held += 1
+                    lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                          sourceBytes: sourceBytes,
+                                                          note: limits.heldOne))
                 case .unreadable:
                     counts.failed += 1
+                    lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                          sourceBytes: sourceBytes,
+                                                          note: strings.failedOne))
                 case let .file(data):
-                    let name = ShelfPDFFit.outputFileName(for: target.url)
-                    if ShelfService.shared.replaceItemWithGeneratedFile(target.id, data: data, named: name) {
+                    let proposed = ShelfPDFFit.outputFileName(for: target.url)
+                    if Int64(data.count) >= sourceBytes {
+                        counts.already += 1
+                        lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                              sourceBytes: sourceBytes,
+                                                              note: strings.alreadyOne))
+                    } else if let name = ShelfService.shared.installFittedFile(target.id, data: data, proposedName: proposed) {
                         counts.fitted += 1
+                        lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                              sourceBytes: sourceBytes,
+                                                              outputName: name,
+                                                              outputBytes: Int64(data.count)))
                     } else {
                         counts.failed += 1
+                        lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                              sourceBytes: sourceBytes,
+                                                              note: strings.failedOne))
                     }
                 }
                 self.phase = .working(done: index + 1, total: targets.count)
                 self.apply(targets, index: index + 1, preset: preset, policy: policy,
-                           imagePolicy: imagePolicy, generation: generation, counts: counts)
+                           imagePolicy: imagePolicy, generation: generation, counts: counts, lines: lines)
             }
         }
     }
@@ -341,7 +380,7 @@ struct ShelfPDFFitView: View {
                     .keyboardShortcut(.cancelAction)
                 Button(strings.reduce) { presenter.reduce() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(presenter.isWorking || !presenter.preset.reduces || presenter.calculating != nil)
+                    .disabled(!presenter.canReduce)
             }
         }
     }

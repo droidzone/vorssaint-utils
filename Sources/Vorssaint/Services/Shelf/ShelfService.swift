@@ -1739,6 +1739,26 @@ final class ShelfService: ObservableObject {
         return true
     }
 
+    /// Puts a rewritten picture on the shelf under `proposedName`.
+    /// When that name is the source's own name, the saved naming choice either
+    /// adds `_vor` or reuses the name and keeps the original as `_bak`.
+    /// Answers the file name actually used.
+    func installFittedFile(_ id: UUID, data: Data, proposedName: String) -> String? {
+        guard case let .file(source)? = item(withID: id)?.payload else { return nil }
+        let plan = ShelfSavedName.plan(sourceFileName: source.lastPathComponent, proposed: proposedName)
+        if plan.replacesOriginal {
+            guard let backup = plan.backupFileName,
+                  ShelfSavedName.replaceOriginal(at: source, with: data, backupName: backup) else { return nil }
+            let replacement = fileItem(for: source, id: id, deferImageThumbnail: true)
+            replaceItem(replacement)
+            startContentThumbnails(for: [replacement])
+            noteInteraction()
+            return plan.fileName
+        }
+        guard replaceItemWithGeneratedFile(id, data: data, named: plan.fileName) else { return nil }
+        return plan.fileName
+    }
+
     /// The pasteboard representation used when dragging an item out of the shelf.
     func pasteboardWriter(for item: Item) -> NSPasteboardWriting {
         switch item.payload {

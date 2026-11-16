@@ -1,6 +1,9 @@
 # Build artifacts
 build/
 dist/
+
+# Box login for production uploads. The example file stays in the repo.
+/packaging/macos/local.env
 .build/
 *.dmg
 

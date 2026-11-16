@@ -108,28 +108,133 @@ enum ShelfPDFFit {
                        preset: ShelfPDFFitPreset,
                        pdfPolicy: ShelfPDFFitPolicy = .load(),
                        imagePolicy: ShelfImageFitPolicy = .load()) -> ShelfPDFFitResult {
-        guard preset != .original else { return .unchanged }
-        guard let document = PDFDocument(url: url), document.pageCount > 0 else { return .unreadable }
+        measure(url: url, pdfPolicy: pdfPolicy, imagePolicy: imagePolicy)[preset] ?? .unreadable
+    }
+
+    /// Sizes for every row. Lossy rows are forced under the original and under
+    /// lossless when that rewrite is smaller, and each step is smaller than
+    /// the one above it. The byte count is the file that would be written.
+    static func measure(url: URL,
+                        pdfPolicy: ShelfPDFFitPolicy = .load(),
+                        imagePolicy: ShelfImageFitPolicy = .load()) -> [ShelfPDFFitPreset: ShelfPDFFitResult] {
+        guard let document = PDFDocument(url: url), document.pageCount > 0 else {
+            return Dictionary(uniqueKeysWithValues: ShelfPDFFitPreset.allCases.filter(\.reduces).map { ($0, .unreadable) })
+        }
         let sourceBytes = fileBytes(url)
         let pdf = pdfPolicy.sanitized()
         let image = imagePolicy.sanitized()
-        let written: Data?
-        switch preset {
-        case .original:
-            written = nil
-        case .lossless:
-            written = rewriteLossless(document)
-        case .maximum, .high, .medium, .low:
-            guard let level = pdf.level(for: preset) else { return .unreadable }
-            let quality = resolvedQuality(level.qualityPercent, imagePolicy: image)
-            written = rasterize(document, dpi: level.dpi, quality: quality, grayscale: pdf.grayscale)
+        var results: [ShelfPDFFitPreset: ShelfPDFFitResult] = [.original: .unchanged]
+        results[.lossless] = judged(rewriteLossless(document), imagePolicy: image)
+        let losslessBytes = byteCount(results[.lossless])
+        var ceiling = sourceBytes > 0 ? sourceBytes : Int64.max
+        if let losslessBytes, losslessBytes < ceiling {
+            ceiling = losslessBytes
         }
-        guard let written, !written.isEmpty else { return .unreadable }
-        if let minimum = image.minimumFileBytes, Int64(written.count) < minimum {
+        for (preset, data) in descendingLossy(document, ceiling: ceiling, pdf: pdf, image: image) {
+            results[preset] = judged(data, imagePolicy: image)
+        }
+        return results
+    }
+
+    private static func judged(_ data: Data?, imagePolicy: ShelfImageFitPolicy) -> ShelfPDFFitResult {
+        guard let data, !data.isEmpty else { return .unreadable }
+        if let minimum = imagePolicy.minimumFileBytes, Int64(data.count) < minimum {
             return .belowMinimum
         }
-        if sourceBytes > 0, Int64(written.count) >= sourceBytes { return .unchanged }
-        return .file(written)
+        return .file(data)
+    }
+
+    private static func byteCount(_ result: ShelfPDFFitResult?) -> Int64? {
+        if case let .file(data) = result { return Int64(data.count) }
+        return nil
+    }
+
+    /// Each lossy preset starts from its own detail and JPEG quality, then
+    /// steps down until the file is visibly smaller than the preset above it.
+    private static func descendingLossy(_ document: PDFDocument,
+                                        ceiling: Int64,
+                                        pdf: ShelfPDFFitPolicy,
+                                        image: ShelfImageFitPolicy) -> [ShelfPDFFitPreset: Data] {
+        let order: [ShelfPDFFitPreset] = [.maximum, .high, .medium, .low]
+        guard let first = document.page(at: 0) else { return [:] }
+        let box = first.bounds(for: .mediaBox)
+        let sharpest = order.compactMap { pdf.level(for: $0)?.dpi }.max() ?? 150
+        let baseDPI = min(sharpest, dpiFitting(box, longSide: 2_400))
+        guard let base = drawPages(document, dpi: baseDPI, grayscale: pdf.grayscale), !base.isEmpty else {
+            return [:]
+        }
+        var limit = ceiling
+        var cursorDPI = Int.max
+        var cursorQuality = 100
+        let floor = image.minimumQualityEnabled ? image.minimumQualityPercent : 30
+        var output: [ShelfPDFFitPreset: Data] = [:]
+        for preset in order {
+            guard let level = pdf.level(for: preset) else { continue }
+            var dpi = min(level.dpi, baseDPI, cursorDPI)
+            var quality = min(resolvedQuality(level.qualityPercent, imagePolicy: image), cursorQuality)
+            if preset != .maximum {
+                if dpi > 36 {
+                    dpi = max(36, Int((Double(dpi) * 0.85).rounded(.down)))
+                } else {
+                    quality = max(floor, quality - 8)
+                }
+            }
+            guard let fit = shrink(base, startDPI: dpi, quality: quality, floor: floor, limit: limit) else {
+                continue
+            }
+            output[preset] = fit.data
+            if meaningfullySmaller(Int64(fit.data.count), than: limit) {
+                limit = Int64(fit.data.count)
+                cursorDPI = fit.dpi
+                cursorQuality = fit.quality
+            }
+        }
+        return output
+    }
+
+    private struct LossyFit {
+        var data: Data
+        var dpi: Int
+        var quality: Int
+    }
+
+    private static func shrink(_ pages: [ShelfPDFDrawnPage],
+                               startDPI: Int,
+                               quality: Int,
+                               floor: Int,
+                               limit: Int64) -> LossyFit? {
+        var dpi = max(36, startDPI)
+        var quality = min(100, max(floor, quality))
+        var best: LossyFit?
+        for _ in 0..<10 {
+            guard let data = rasterize(pages, dpi: dpi, quality: quality), !data.isEmpty else { return best }
+            let fit = LossyFit(data: data, dpi: dpi, quality: quality)
+            best = fit
+            if meaningfullySmaller(Int64(data.count), than: limit) { return fit }
+            if dpi > 36 {
+                let next = max(36, Int((Double(dpi) * 0.7).rounded(.down)))
+                if next >= dpi { return fit }
+                dpi = next
+            } else if quality > floor {
+                quality = max(floor, quality - 12)
+            } else {
+                return fit
+            }
+        }
+        return best
+    }
+
+    /// Far enough under the previous size that the list does not show the same kilobytes.
+    private static func meaningfullySmaller(_ bytes: Int64, than limit: Int64) -> Bool {
+        guard limit < Int64.max else { return bytes > 0 }
+        let gap = max(Int64(2_000), limit / 40)
+        return bytes + gap <= limit
+    }
+
+    private static func dpiFitting(_ box: CGRect, longSide: CGFloat) -> Int {
+        let points = max(box.width, box.height)
+        guard points > 1 else { return 144 }
+        return max(36, Int((longSide * 72 / points).rounded()))
     }
 
     static func resolvedQuality(_ quality: Int, imagePolicy: ShelfImageFitPolicy) -> Int {
@@ -162,31 +267,70 @@ enum ShelfPDFFit {
         return out.length > 0 ? out as Data : nil
     }
 
-    private static func rasterize(_ document: PDFDocument,
-                                  dpi: Int,
-                                  quality: Int,
-                                  grayscale: Bool) -> Data? {
-        var pages: [ShelfPDFPageImage] = []
+    private static func drawPages(_ document: PDFDocument, dpi: Int, grayscale: Bool) -> [ShelfPDFDrawnPage]? {
+        var pages: [ShelfPDFDrawnPage] = []
         for index in 0..<document.pageCount {
             guard let page = document.page(at: index),
-                  let rendered = render(page, dpi: dpi, quality: quality, grayscale: grayscale) else { continue }
-            pages.append(rendered)
+                  let drawn = draw(page, dpi: dpi, grayscale: grayscale) else { continue }
+            pages.append(drawn)
         }
         guard pages.count == document.pageCount, !pages.isEmpty else { return nil }
-        return ShelfPDFJPEGDocument.make(pages: pages)
+        return pages
     }
 
-    private static func render(_ page: PDFPage,
-                               dpi: Int,
-                               quality: Int,
-                               grayscale: Bool) -> ShelfPDFPageImage? {
+    private static func rasterize(_ pages: [ShelfPDFDrawnPage], dpi: Int, quality: Int) -> Data? {
+        var encoded: [ShelfPDFPageImage] = []
+        for page in pages {
+            let side = longSide(page.mediaBox, dpi: dpi)
+            guard let image = scaled(page.image, longSide: side),
+                  let jpeg = ShelfImageFit.encodedImage(image, qualityPercent: quality, format: .jpeg),
+                  !jpeg.isEmpty else { return nil }
+            let gray = image.colorSpace?.model == .monochrome || image.bitsPerPixel <= 8
+            encoded.append(ShelfPDFPageImage(jpeg: jpeg,
+                                             mediaBox: page.mediaBox,
+                                             pixelWidth: image.width,
+                                             pixelHeight: image.height,
+                                             grayscale: gray))
+        }
+        return ShelfPDFJPEGDocument.make(pages: encoded)
+    }
+
+    private static func longSide(_ box: CGRect, dpi: Int) -> Int {
+        let scale = CGFloat(max(36, dpi)) / 72
+        return max(1, Int((max(box.width, box.height) * scale).rounded()))
+    }
+
+    private static func scaled(_ image: CGImage, longSide: Int) -> CGImage? {
+        let sourceLong = max(image.width, image.height)
+        if longSide >= sourceLong { return image }
+        let scale = CGFloat(longSide) / CGFloat(sourceLong)
+        let width = max(1, Int((CGFloat(image.width) * scale).rounded()))
+        let height = max(1, Int((CGFloat(image.height) * scale).rounded()))
+        let size = CGSize(width: width, height: height)
+        guard MediaSupport.imageRenderSizeIsSafe(size) else { return nil }
+        let gray = image.colorSpace?.model == .monochrome
+        let colorSpace = gray ? CGColorSpaceCreateDeviceGray() : CGColorSpaceCreateDeviceRGB()
+        let alpha = gray ? CGImageAlphaInfo.none.rawValue : CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let context = CGContext(data: nil,
+                                      width: width,
+                                      height: height,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: 0,
+                                      space: colorSpace,
+                                      bitmapInfo: alpha) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
+    }
+
+    private static func draw(_ page: PDFPage, dpi: Int, grayscale: Bool) -> ShelfPDFDrawnPage? {
         let box = page.bounds(for: .mediaBox)
         guard box.width > 1, box.height > 1 else { return nil }
         let scale = CGFloat(dpi) / 72
         var pixelWidth = max(1, box.width * scale)
         var pixelHeight = max(1, box.height * scale)
         let longSide = max(pixelWidth, pixelHeight)
-        let cap: CGFloat = 4_096
+        let cap: CGFloat = 1_800
         if longSide > cap {
             let fitted = cap / longSide
             pixelWidth *= fitted
@@ -217,16 +361,14 @@ enum ShelfPDFFit {
         context.translateBy(x: -box.origin.x, y: -box.origin.y)
         page.draw(with: .mediaBox, to: context)
         context.restoreGState()
-        guard let image = context.makeImage(),
-              let jpeg = ShelfImageFit.encodedImage(image, qualityPercent: quality, format: .jpeg),
-              !jpeg.isEmpty else { return nil }
-        let gray = grayscale || image.colorSpace?.model == .monochrome
-        return ShelfPDFPageImage(jpeg: jpeg,
-                                 mediaBox: box,
-                                 pixelWidth: image.width,
-                                 pixelHeight: image.height,
-                                 grayscale: gray)
+        guard let image = context.makeImage() else { return nil }
+        return ShelfPDFDrawnPage(image: image, mediaBox: box)
     }
+}
+
+private struct ShelfPDFDrawnPage {
+    var image: CGImage
+    var mediaBox: CGRect
 }
 
 private struct ShelfPDFPageImage {

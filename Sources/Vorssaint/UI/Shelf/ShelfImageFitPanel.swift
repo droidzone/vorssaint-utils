@@ -70,7 +70,7 @@ final class ShelfImageFitPresenter: ObservableObject {
         let generation = self.generation
         phase = .working(done: 0, total: targets.count)
         compress(targets, index: 0, budget: budget, policy: policy, generation: generation,
-                 counts: ShelfImageFitCounts())
+                 counts: ShelfImageFitCounts(), lines: [])
     }
 
     func setUnit(_ newUnit: ShelfFitByteUnit) {
@@ -116,39 +116,59 @@ final class ShelfImageFitPresenter: ObservableObject {
                           budget: Int64,
                           policy: ShelfImageFitPolicy,
                           generation: Int,
-                          counts: ShelfImageFitCounts) {
+                          counts: ShelfImageFitCounts,
+                          lines: [String]) {
         guard generation == self.generation else { return }
         guard index < targets.count else {
-            let strings = ShelfImageFitStrings.localized(L10n.shared.language)
-            let limits = ShelfCompressStrings.localized(L10n.shared.language)
-            phase = .finished(ShelfImageFit.summary(counts, strings: strings, limits: limits))
-            relayout()
+            ShelfFitResultDialog.show(lines)
+            close()
             return
         }
         let target = targets[index]
+        let sourceName = target.url.lastPathComponent
+        let sourceBytes = Int64((try? target.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         DispatchQueue.global(qos: .userInitiated).async {
             let encoded = ShelfImageFit.encode(url: target.url, targetBytes: budget, policy: policy)
             DispatchQueue.main.async {
                 guard generation == self.generation else { return }
+                let strings = ShelfImageFitStrings.localized(L10n.shared.language)
+                let limits = ShelfCompressStrings.localized(L10n.shared.language)
                 var counts = counts
+                var lines = lines
                 switch encoded {
                 case .alreadyWithinBudget:
                     counts.already += 1
+                    lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                          sourceBytes: sourceBytes,
+                                                          note: strings.alreadyOne))
                 case .heldForMinimum:
                     counts.held += 1
+                    lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                          sourceBytes: sourceBytes,
+                                                          note: limits.heldOne))
                 case .impossible, .unreadable:
                     counts.failed += 1
+                    lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                          sourceBytes: sourceBytes,
+                                                          note: strings.failedOne))
                 case let .file(data, format):
-                    let name = ShelfImageFit.outputFileName(for: target.url, format: format)
-                    if ShelfService.shared.replaceItemWithGeneratedFile(target.id, data: data, named: name) {
+                    let proposed = ShelfImageFit.outputFileName(for: target.url, format: format)
+                    if let name = ShelfService.shared.installFittedFile(target.id, data: data, proposedName: proposed) {
                         counts.fitted += 1
+                        lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                              sourceBytes: sourceBytes,
+                                                              outputName: name,
+                                                              outputBytes: Int64(data.count)))
                     } else {
                         counts.failed += 1
+                        lines.append(ShelfImageFit.resultLine(sourceName: sourceName,
+                                                              sourceBytes: sourceBytes,
+                                                              note: strings.failedOne))
                     }
                 }
                 self.phase = .working(done: index + 1, total: targets.count)
                 self.compress(targets, index: index + 1, budget: budget, policy: policy,
-                              generation: generation, counts: counts)
+                              generation: generation, counts: counts, lines: lines)
             }
         }
     }
@@ -224,8 +244,8 @@ enum ShelfImageConvert {
                 var nextFitted = fitted
                 var nextFailed = failed
                 if case let .file(data, written) = encoded {
-                    let name = ShelfImageFit.outputFileName(for: target.url, format: written)
-                    if ShelfService.shared.replaceItemWithGeneratedFile(target.id, data: data, named: name) {
+                    let proposed = ShelfImageFit.outputFileName(for: target.url, format: written)
+                    if ShelfService.shared.installFittedFile(target.id, data: data, proposedName: proposed) != nil {
                         nextFitted += 1
                     } else {
                         nextFailed += 1
@@ -477,5 +497,93 @@ struct ShelfImageFitView: View {
             }
         }
         .controlSize(.regular)
+    }
+}
+
+/// A small note of each compressed file. It fades in, stays two seconds, and
+/// goes away on its own. It does not take the keyboard or the pointer.
+enum ShelfFitResultDialog {
+    private static var panel: NSPanel?
+    private static var dismissWork: DispatchWorkItem?
+    private static var generation = 0
+    /// Long enough for a capture name, its old size, and its new size on one line.
+    private static let lineWidth: CGFloat = 560
+
+    static func show(_ lines: [String]) {
+        let lines = lines.filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return }
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { show(lines) }
+            return
+        }
+        let content = VStack(alignment: .leading, spacing: 3) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: lineWidth, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+        let host = NSHostingController(rootView: content)
+        host.view.layoutSubtreeIfNeeded()
+        let size = host.view.fittingSize
+        let panel = ensurePanel()
+        panel.contentViewController = host
+        let frame = NSScreen.pointerVisibleFrame
+        let width = min(size.width, frame.width - 32)
+        let height = min(size.height, frame.height - 48)
+        panel.setFrame(NSRect(x: frame.midX - width / 2,
+                              y: frame.maxY - height - 24,
+                              width: width,
+                              height: height),
+                       display: true)
+        generation += 1
+        let shown = generation
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            panel.animator().alphaValue = 1
+        }
+        dismissWork?.cancel()
+        let work = DispatchWorkItem { dismiss(shown) }
+        dismissWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+    }
+
+    private static func dismiss(_ shown: Int) {
+        guard let panel, generation == shown else { return }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.22
+            panel.animator().alphaValue = 0
+        }, completionHandler: {
+            guard generation == shown else { return }
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+            dismissWork = nil
+        })
+    }
+
+    private static func ensurePanel() -> NSPanel {
+        if let panel { return panel }
+        let panel = OverlayPanel(contentRect: .zero,
+                                 styleMask: [.borderless, .nonactivatingPanel],
+                                 backing: .buffered,
+                                 defer: false)
+        panel.level = .statusBar
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        self.panel = panel
+        return panel
     }
 }

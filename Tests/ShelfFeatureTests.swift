@@ -1000,6 +1000,37 @@ enum ShelfFeatureTests {
                 && ShelfImageFit.outputFileName(for: URL(fileURLWithPath: "/tmp/.."),
                                                 format: .heic) == "Image.heic",
                "a compressed picture keeps its name and takes the format that made it fit")
+        let sameJPEG = ShelfSavedName.plan(sourceFileName: "Photo.JPG", proposed: "Photo.jpg", style: .addVor)
+        let changedFormat = ShelfSavedName.plan(sourceFileName: "Photo Shot.png", proposed: "Photo Shot.jpg", style: .addVor)
+        let overwrite = ShelfSavedName.plan(sourceFileName: "Photo.JPG", proposed: "Photo.jpg", style: .overwriteOriginal)
+        suite.expect(sameJPEG.fileName == "Photo_vor.jpg" && !sameJPEG.replacesOriginal
+                && changedFormat.fileName == "Photo Shot.jpg" && changedFormat.backupFileName == nil,
+               "a matching file name gains _vor, and a different name is left as proposed")
+        suite.expect(overwrite.fileName == "Photo.JPG" && overwrite.backupFileName == "Photo_bak.JPG",
+               "overwriting reuses the original name and keeps the original as _bak")
+        suite.expect(ShelfSavedName.availableBackupName("Photo_bak.JPG", exists: { $0 == "Photo_bak.JPG" })
+                == "Photo_bak 2.JPG",
+               "an existing _bak file is not replaced")
+        let namingRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shelf-name-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: namingRoot) }
+        try? FileManager.default.createDirectory(at: namingRoot, withIntermediateDirectories: true)
+        let namingSource = namingRoot.appendingPathComponent("Photo.JPG")
+        try? Data("old".utf8).write(to: namingSource)
+        let replaced = ShelfSavedName.replaceOriginal(at: namingSource, with: Data("new".utf8),
+                                                      backupName: "Photo_bak.JPG")
+        let written = (try? String(contentsOf: namingSource, encoding: .utf8)) ?? ""
+        let kept = (try? String(contentsOf: namingRoot.appendingPathComponent("Photo_bak.JPG"),
+                                encoding: .utf8)) ?? ""
+        suite.expect(replaced && written == "new" && kept == "old",
+               "overwriting writes the new file under the original name and keeps the original as _bak, got \(written) and \(kept)")
+        _ = ShelfSavedName.replaceOriginal(at: namingSource, with: Data("newer".utf8), backupName: "Photo_bak.JPG")
+        let secondBackup = (try? String(contentsOf: namingRoot.appendingPathComponent("Photo_bak 2.JPG"),
+                                        encoding: .utf8)) ?? ""
+        let firstBackup = (try? String(contentsOf: namingRoot.appendingPathComponent("Photo_bak.JPG"),
+                                       encoding: .utf8)) ?? ""
+        suite.expect(secondBackup == "new" && firstBackup == "old",
+               "a second overwrite keeps the first _bak and writes the previous bytes as _bak 2")
 
         let imageID = UUID()
         let photoID = UUID()
@@ -1089,6 +1120,19 @@ enum ShelfFeatureTests {
                                           minimumFileBytes: nil, measure: { _ in 10_000 }) == .impossible,
                "a budget no step can reach is reported instead of writing an oversized file")
 
+        let sourceLabel = ShelfImageFit.byteLabel(100_000_000)
+        let outputLabel = ShelfImageFit.byteLabel(75_000)
+        let capture = "2026-07-14 14-00-21_capture_0001.png"
+        let fittedLine = ShelfImageFit.resultLine(sourceName: capture,
+                                                  sourceBytes: 100_000_000,
+                                                  outputName: "2026-07-14 14-00-21_capture_0001.jpg",
+                                                  outputBytes: 75_000)
+        suite.expect(fittedLine == "\"\(capture)\" (\(sourceLabel)) -> 2026-07-14 14-00-21_capture_0001 (\(outputLabel))",
+               "a compressed picture names the original and the smaller result, got \(fittedLine)")
+        let skipped = ShelfImageFit.resultLine(sourceName: capture, sourceBytes: 40_000, note: "Already under this size")
+        suite.expect(skipped == "\"\(capture)\" (\(ShelfImageFit.byteLabel(40_000))) -> Already under this size",
+               "a picture left alone still gets its own result line, got \(skipped)")
+
         let summary = ShelfImageFit.summary(ShelfImageFitCounts(fitted: 2, already: 1, failed: 0),
                                             strings: .enUS)
         suite.expect(summary == "2 compressed\nAlready under this size",
@@ -1175,6 +1219,21 @@ enum ShelfFeatureTests {
             case .belowMinimum, .unreadable:
                 suite.expect(false, "a lossless rewrite stays readable, got \(lossless)")
             }
+            let measured = ShelfPDFFit.measure(url: pdfURL, pdfPolicy: .standard, imagePolicy: permissive)
+            func counted(_ preset: ShelfPDFFitPreset) -> Int {
+                if case let .file(data) = measured[preset] { return data.count }
+                return -1
+            }
+            let losslessCount = counted(.lossless)
+            let maximumCount = counted(.maximum)
+            let highCount = counted(.high)
+            let mediumCount = counted(.medium)
+            let lowCount = counted(.low)
+            let ceiling = min(sourceBytes, losslessCount > 0 ? losslessCount : sourceBytes)
+            suite.expect(maximumCount > 0 && maximumCount < ceiling,
+                   "maximum quality stays under lossless and the original, got \(maximumCount) against \(ceiling)")
+            suite.expect(lowCount < mediumCount && mediumCount < highCount && highCount < maximumCount,
+                   "each lower quality is a smaller file, got maximum \(maximumCount), high \(highCount), medium \(mediumCount), low \(lowCount)")
         } else {
             suite.expect(false, "the sample PDF could not be written")
         }

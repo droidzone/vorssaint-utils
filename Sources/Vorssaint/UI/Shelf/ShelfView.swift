@@ -23,6 +23,8 @@ struct ShelfView: View {
     @State private var clearButtonHovered = false
     @State private var shareButtonHovered = false
     @State private var fitButtonHovered = false
+    @State private var nameButtonHovered = false
+    @AppStorage(DefaultsKey.shelfOutputNaming) private var namingRaw = ShelfSavedNameStyle.addVor.rawValue
     /// The system share sheet points at a real view, which SwiftUI does not
     /// hand out; this invisible one sits behind the share button.
     @State private var shareAnchor = ShelfSharePickerAnchor.Anchor()
@@ -166,11 +168,50 @@ struct ShelfView: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
             Spacer(minLength: 8)
+            nameStyleButton
             fitButton
             shareButton
             clearButton
         }
         .frame(minHeight: 30)
+    }
+
+    private var naming: ShelfSavedNameStyle {
+        ShelfSavedNameStyle(rawValue: namingRaw) ?? .addVor
+    }
+
+    /// Chooses what happens when a rewritten file would keep the source name.
+    private var nameStyleButton: some View {
+        let strings = ShelfFileNameStrings.localized(l10n.language)
+        let hovered = nameButtonHovered
+        return Menu {
+            Button {
+                namingRaw = ShelfSavedNameStyle.addVor.rawValue
+            } label: {
+                if naming == .addVor {
+                    Label(strings.addVor, systemImage: "checkmark")
+                } else {
+                    Text(strings.addVor)
+                }
+            }
+            Button {
+                namingRaw = ShelfSavedNameStyle.overwriteOriginal.rawValue
+            } label: {
+                if naming == .overwriteOriginal {
+                    Label(strings.overwrite, systemImage: "checkmark")
+                } else {
+                    Text(strings.overwrite)
+                }
+            }
+        } label: {
+            footerButtonFace(systemImage: "square.and.pencil", tint: .accentColor, hovered: hovered)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { nameButtonHovered = $0 }
+        .help(strings.help)
+        .accessibilityLabel(strings.help)
     }
 
     private var fitButton: some View {

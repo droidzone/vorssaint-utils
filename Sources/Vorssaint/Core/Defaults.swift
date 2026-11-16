@@ -217,6 +217,7 @@ enum DefaultsKey {
     static let shelfImageFitUnit = "shelfImageFitUnit" // ShelfFitByteUnit raw value
     static let shelfImageFitPolicy = "shelfImageFitPolicy" // JSON ShelfImageFitPolicy
     static let shelfPDFFitPolicy = "shelfPDFFitPolicy" // JSON ShelfPDFFitPolicy
+    static let shelfOutputNaming = "shelfOutputNaming" // ShelfSavedNameStyle raw value
     static let shelfShortcutAddsFinderSelection = "shelfShortcutAddsFinderSelection"
     static let shelfAutomaticExclusions = "shelfAutomaticExclusions" // [bundle id] blocks automatic opening only
     static let extraBrightnessEnabled = "extraBrightnessEnabled"
@@ -1376,6 +1377,7 @@ enum Defaults {
         DefaultsKey.shelfRemoveAfterDrop: true,
         DefaultsKey.shelfClearOnClose: false,
         DefaultsKey.shelfImageFitKilobytes: ShelfImageFit.defaultKilobytes,
+        DefaultsKey.shelfOutputNaming: ShelfSavedNameStyle.addVor.rawValue,
         DefaultsKey.shelfShortcutAddsFinderSelection: false,
         DefaultsKey.shelfAutomaticExclusions: [String](),
         DefaultsKey.extraBrightnessEnabled: false,
